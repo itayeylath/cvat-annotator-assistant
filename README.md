@@ -1,0 +1,1 @@
+# cvat-annotator-assistant
