@@ -32,6 +32,9 @@ class Params(BaseModel):
     min_aspect: float = 0.15
     max_aspect: float = 6.0
 
+class ClearParams(BaseModel):
+    job_id: int
+
 # ==== Helpers ====
 
 async def fetch_image(url: str) -> np.ndarray:
@@ -180,3 +183,23 @@ async def auto_sections(p: Params):
         if r.status_code >= 300:
             raise HTTPException(r.status_code, f"CVAT PATCH failed: {r.text}")
     return {"patched": len(shapes)}
+
+@app.post("/clear_sections")
+async def clear_sections(p: ClearParams):
+    """Remove all annotations from a CVAT job."""
+    if not CVAT_TOKEN:
+        raise HTTPException(400, "Missing CVAT_TOKEN env")
+
+    async with httpx.AsyncClient(timeout=60) as cl:
+        url = f"{CVAT_BASE_URL}/api/jobs/{p.job_id}/annotations"
+        headers = {
+            "Authorization": f"Token {CVAT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        
+        # DELETE request to remove all annotations
+        r = await cl.delete(url, headers=headers)
+        if r.status_code >= 300:
+            raise HTTPException(r.status_code, f"CVAT DELETE failed: {r.text}")
+    
+    return {"message": "All annotations cleared from job", "job_id": p.job_id}
