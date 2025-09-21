@@ -151,30 +151,7 @@ def find_rectangles(img: np.ndarray, p: Params) -> list[np.ndarray]:
             continue
         kept.append(q)
     return kept
-
-def draw_quads(img: np.ndarray, quads: list[np.ndarray]) -> np.ndarray:
-    out = img.copy()
-    for q in quads:
-        q = order_quad_points(q).astype(int)
-        cv2.polylines(out, [q.reshape(-1,1,2)], isClosed=True, color=(0,255,0), thickness=2)
-        # draw corners
-        for (x,y) in q:
-            cv2.circle(out, (int(x),int(y)), 4, (0,0,255), -1)
-    return out
-
 # ==== Endpoints ====
-
-@app.post("/dry_run")
-async def dry_run(p: Params):
-    img = await fetch_image(p.image_url)
-    quads = find_rectangles(img, p)
-    shapes = []
-    label_id = p.label_id if p.label_id is not None else 1  # default for testing
-    for q in quads:
-        poly = to_cvat_polygon(q, label_id, p.frame)
-        if poly:
-            shapes.append(poly)
-    return {"count": len(shapes), "shapes": shapes}
 
 @app.post("/auto_sections")
 async def auto_sections(p: Params):
@@ -203,32 +180,3 @@ async def auto_sections(p: Params):
         if r.status_code >= 300:
             raise HTTPException(r.status_code, f"CVAT PATCH failed: {r.text}")
     return {"patched": len(shapes)}
-
-@app.get("/preview")
-async def preview(
-    image_url: str = Query(..., description="Image URL to preview"),
-    min_area: int = 4000,
-    canny1: int = 60,
-    canny2: int = 180,
-    approx_epsilon: float = 0.02,
-    rect_axis_align_tolerance: float = 10.0,
-    min_aspect: float = 0.15,
-    max_aspect: float = 6.0,
-):
-    p = Params(
-        image_url=image_url,
-        min_area=min_area,
-        canny1=canny1,
-        canny2=canny2,
-        approx_epsilon=approx_epsilon,
-        rect_axis_align_tolerance=rect_axis_align_tolerance,
-        min_aspect=min_aspect,
-        max_aspect=max_aspect,
-    )
-    img = await fetch_image(image_url)
-    quads = find_rectangles(img, p)
-    vis = draw_quads(img, quads)
-    ok, buf = cv2.imencode(".png", vis)
-    if not ok:
-        raise HTTPException(500, "Failed to encode preview")
-    return StreamingResponse(io.BytesIO(buf.tobytes()), media_type="image/png")
