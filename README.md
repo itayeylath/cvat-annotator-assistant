@@ -1,5 +1,7 @@
 # cvat-annotator-assistant
 
+I set up cvat locally and created token.
+
 A prototype of a labeling assistant locally on your Mac first, then port it to your work environment if it’s successful. 
 
 "keep it simple—run your FastAPI server locally (no Docker), call SAM, return polygons for label_id=section, and POST them into your CVAT job using the annotations API."-
