@@ -178,6 +178,7 @@ async def dry_run(p: Params):
 
 @app.post("/auto_sections")
 async def auto_sections(p: Params):
+    print(f"***** itay test")
     if not CVAT_TOKEN:
         raise HTTPException(400, "Missing CVAT_TOKEN env")
     if p.job_id is None or p.label_id is None:
@@ -185,6 +186,7 @@ async def auto_sections(p: Params):
 
     img = await fetch_image(p.image_url)
     quads = find_rectangles(img, p)
+    print(f"***** quads: {quads}")
     shapes = []
     for q in quads:
         poly = to_cvat_polygon(q, p.label_id, p.frame)
@@ -192,7 +194,7 @@ async def auto_sections(p: Params):
             shapes.append(poly)
 
     async with httpx.AsyncClient(timeout=60) as cl:
-        url = f"{CVAT_BASE_URL}/api/jobs/{p.job_id}/annotations"
+        url = f"{CVAT_BASE_URL}/api/jobs/{p.job_id}/annotations?action=create"
         headers = {
             "Authorization": f"Token {CVAT_TOKEN}",
             "Content-Type": "application/json",
