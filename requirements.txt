@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+httpx
+opencv-python
+numpy
+shapely
+pydantic

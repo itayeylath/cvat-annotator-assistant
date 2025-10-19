@@ -165,6 +165,7 @@ async def auto_sections(p: Params):
         raise HTTPException(400, "job_id and label_id are required")
 
     img = await fetch_image(p.image_url)
+    # quads = refal.function()
     quads = find_rectangles(img, p)
     print(f"***** quads: {quads}")
     shapes = []
@@ -203,3 +204,47 @@ async def clear_sections(p: ClearParams):
             raise HTTPException(r.status_code, f"CVAT DELETE failed: {r.text}")
     
     return {"message": "All annotations cleared from job", "job_id": p.job_id}
+
+@app.get("/get_polygons")
+async def get_polygons(
+    job_id: int = Query(..., description="CVAT job ID"),
+    label_id: Optional[int] = Query(None, description="Optional label ID to filter polygons")
+):
+    """
+    Fetch polygon annotations (label coordinates) from a CVAT job.
+    Returns a list of polygons with coordinates and metadata.
+    """
+    if not CVAT_TOKEN:
+        raise HTTPException(400, "Missing CVAT_TOKEN env")
+
+    async with httpx.AsyncClient(timeout=60) as cl:
+        url = f"{CVAT_BASE_URL}/api/jobs/{job_id}/annotations"
+        headers = {
+            "Authorization": f"Token {CVAT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
+        r = await cl.get(url, headers=headers)
+        if r.status_code >= 300:
+            raise HTTPException(r.status_code, f"Failed to fetch polygons: {r.text}")
+        
+        data = r.json()
+        shapes = data.get("shapes", [])
+        
+        # Filter only polygons (not rectangles, points, etc.)
+        polygons = [s for s in shapes if s.get("type") == "polygon"]
+        if label_id is not None:
+            polygons = [s for s in polygons if s.get("label_id") == label_id]
+
+        # Simplify the output
+        simplified = [
+            {
+                "label_id": p["label_id"],
+                "frame": p["frame"],
+                "points": p["points"],  # flat list [x1, y1, x2, y2, ...]
+                "group": p.get("group", 0),
+            }
+            for p in polygons
+        ]
+
+        return {"job_id": job_id, "count": len(simplified), "polygons": simplified}
