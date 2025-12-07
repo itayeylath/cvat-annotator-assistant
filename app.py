@@ -10,8 +10,8 @@ from shapely.geometry import Polygon
 from typing import Optional
 
 # --- Config via env ---
-CVAT_BASE_URL = os.getenv("CVAT_BASE_URL", "http://localhost:8080")
-CVAT_TOKEN = os.getenv("CVAT_TOKEN", "")  # create in CVAT: Account → Tokens
+CVAT_BASE_URL = os.getenv("CVAT_BASE_URL", "")  # TODO: fix
+CVAT_TOKEN = os.getenv("CVAT_TOKEN", "") # TODO: fix
 
 app = FastAPI(title="CVAT Section Assistant (OpenCV)")
 
@@ -34,6 +34,16 @@ class Params(BaseModel):
 
 class ClearParams(BaseModel):
     job_id: int
+
+class PolygonItem(BaseModel):
+    label_id: int
+    frame: int
+    points: list[float]
+    group: int = 0
+
+class PushPolygonsRequest(BaseModel):
+    job_id: int
+    polygons: list[PolygonItem]
 
 # ==== Helpers ====
 
@@ -184,6 +194,64 @@ async def auto_sections(p: Params):
         if r.status_code >= 300:
             raise HTTPException(r.status_code, f"CVAT PATCH failed: {r.text}")
     return {"patched": len(shapes)}
+
+@app.post("/push_polygons_to_cvat")
+async def push_polygons_to_cvat(request: PushPolygonsRequest):
+    """
+    Push pre-computed polygons directly to CVAT.
+    
+    Request body format:
+    {
+        "job_id": 123,
+        "polygons": [
+            {
+                "label_id": 1,
+                "frame": 0,
+                "points": [x1, y1, x2, y2, ...],
+                "group": 0
+            }
+        ]
+    }
+    """
+    if not CVAT_TOKEN:
+        raise HTTPException(400, "Missing CVAT_TOKEN env")
+    
+    # Convert to CVAT shapes format
+    shapes = []
+    for polygon in request.polygons:
+        shape = {
+            "type": "polygon",
+            "occluded": False,
+            "z_order": 0,
+            "rotation": 0.0,
+            "points": polygon.points,
+            "label_id": polygon.label_id,
+            "group": polygon.group,
+            "frame": polygon.frame,
+            "attributes": []
+        }
+        shapes.append(shape)
+    
+    # Push to CVAT
+    async with httpx.AsyncClient(timeout=60) as cl:
+        url = f"{CVAT_BASE_URL}/api/jobs/{request.job_id}/annotations?action=create"
+        headers = {
+            "Authorization": f"Token {CVAT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {"shapes": shapes}
+        r = await cl.patch(url, headers=headers, json=payload)
+        
+        if r.status_code >= 300:
+            raise HTTPException(r.status_code, f"CVAT PATCH failed: {r.text}")
+    
+    return {
+        "success": True,
+        "job_id": request.job_id,
+        "polygons_created": len(shapes),
+        "message": f"Successfully created {len(shapes)} polygons in CVAT job {request.job_id}"
+    }
 
 @app.post("/clear_sections")
 async def clear_sections(p: ClearParams):
