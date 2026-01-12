@@ -10,8 +10,8 @@ from shapely.geometry import Polygon
 from typing import Optional
 
 # --- Config via env ---
-CVAT_BASE_URL = os.getenv("CVAT_BASE_URL", "")  # TODO: fix
-CVAT_TOKEN = os.getenv("CVAT_TOKEN", "") # TODO: fix
+CVAT_BASE_URL = os.getenv("CVAT_BASE_URL", "http://cvat-prod.shopperai.ai/")  # TODO: fix
+CVAT_TOKEN = os.getenv("CVAT_TOKEN", "9208f2c8b44dd6e7692a3b1f6c2e07c11280a265") # TODO: fix
 
 app = FastAPI(title="CVAT Section Assistant (OpenCV)")
 
@@ -301,6 +301,7 @@ async def get_polygons(
         
         # Filter only polygons (not rectangles, points, etc.)
         polygons = [s for s in shapes if s.get("type") == "polygon"]
+
         if label_id is not None:
             polygons = [s for s in polygons if s.get("label_id") == label_id]
 
@@ -314,5 +315,168 @@ async def get_polygons(
             }
             for p in polygons
         ]
-
         return {"job_id": job_id, "count": len(simplified), "polygons": simplified}
+
+@app.get("/get_sections")
+async def get_sections(
+    job_id: int = Query(..., description="CVAT job ID"),
+    label_id: Optional[int] = Query(None, description="Optional label ID to filter polygons"),
+    category_name: str = Query("not_empty", description="Category name to use for sections")
+):
+    """
+    Fetch polygon annotations from CVAT job and return them in sections_0.json format.
+    
+    Returns an array of section objects, each containing:
+    - polygon: Array of [x, y] coordinate pairs (closed polygon, first point = last point)
+    - category_name: Category name for the section (default: "not_empty")
+    
+    Format matches sections_0.json structure used by the product classification pipeline.
+    """
+    if not CVAT_TOKEN:
+        raise HTTPException(400, "Missing CVAT_TOKEN env")
+
+    async with httpx.AsyncClient(timeout=60) as cl:
+        url = f"{CVAT_BASE_URL}/api/jobs/{job_id}/annotations"
+        headers = {
+            "Authorization": f"Token {CVAT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
+        r = await cl.get(url, headers=headers)
+        if r.status_code >= 300:
+            raise HTTPException(r.status_code, f"Failed to fetch annotations: {r.text}")
+        
+        data = r.json()
+        shapes = data.get("shapes", [])
+        
+        # Filter only polygons (not rectangles, points, etc.)
+        polygons = [s for s in shapes if s.get("type") == "polygon"]
+        
+        if label_id is not None:
+            polygons = [s for s in polygons if s.get("label_id") == label_id]
+
+        # Convert to sections_0.json format
+        sections = []
+        for p in polygons:
+            points = p.get("points", [])  # Flat list: [x1, y1, x2, y2, ...]
+            
+            # Convert flat list to array of [x, y] pairs
+            polygon_coords = []
+            if len(points) >= 6:  # At least 3 points (6 coordinates)
+                for i in range(0, len(points), 2):
+                    if i + 1 < len(points):
+                        polygon_coords.append([float(points[i]), float(points[i + 1])])
+            
+            # Close the polygon if needed (first point should equal last point)
+            if len(polygon_coords) >= 3:
+                # Check if polygon is already closed
+                first_point = polygon_coords[0]
+                last_point = polygon_coords[-1]
+                if first_point != last_point:
+                    polygon_coords.append(first_point.copy())  # Close the polygon
+                
+                # Extract category_name from attributes if available
+                section_category = category_name  # Default
+                attributes = p.get("attributes", [])
+                for attr in attributes:
+                    if isinstance(attr, dict):
+                        attr_name = str(attr.get('name', '')).lower()
+                        if 'category' in attr_name or 'section' in attr_name:
+                            section_category = attr.get('value', category_name)
+                
+                sections.append({
+                    "polygon": polygon_coords,
+                    "category_name": section_category
+                })
+        
+        return sections
+
+@app.get("/get_sections_for_catalog")
+async def get_sections_for_catalog(
+    job_id: int = Query(..., description="CVAT job ID"),
+    label_id: Optional[int] = Query(None, description="Optional label ID to filter annotations")
+):
+    """
+    Fetch annotations from CVAT job and return them directly in ground truth JSON format.
+    
+    Returns a list of ground truth entries, each containing:
+    - detection_idx: Index/order of the annotation (0, 1, 2, ...)
+    - product_id: Product name extracted from attributes (required)
+    - section_label: Section label if available in attributes (optional)
+    
+    Only entries with a valid product_id are included in the response.
+    Entries without product_id are skipped (user needs to fill them manually).
+    
+    The response is ready to use as ground truth JSON file for product classification.
+    """
+    if not CVAT_TOKEN:
+        raise HTTPException(400, "Missing CVAT_TOKEN env")
+
+    async with httpx.AsyncClient(timeout=60) as cl:
+        url = f"{CVAT_BASE_URL}/api/jobs/{job_id}/annotations"
+        headers = {
+            "Authorization": f"Token {CVAT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
+        r = await cl.get(url, headers=headers)
+        if r.status_code >= 300:
+            raise HTTPException(r.status_code, f"Failed to fetch annotations: {r.text}")
+        
+        data = r.json()
+        shapes = data.get("shapes", [])
+        
+        # Filter only polygons (not rectangles, points, etc.)
+        polygons = [s for s in shapes if s.get("type") == "polygon"]
+        print(f"***** polygons: {polygons}")
+        if label_id is not None:
+            polygons = [s for s in polygons if s.get("label_id") == label_id]
+
+        # Extract product names and section labels from attributes
+        ground_truth_data = []
+        for idx, p in enumerate(polygons):
+            attributes = p.get("attributes", [])
+            
+            # Extract product name from attributes
+            product_id = None
+            section_label = None
+            
+            for attr in attributes:
+                # Look for product name in attributes
+                # Pattern 1: {'spec_id': X, 'value': 'ProductName'}
+                if 'value' in attr and attr['value']:
+                    value = attr['value']
+                    # Skip boolean/numeric values that aren't product names
+                    if isinstance(value, str) and value.lower() not in ['true', 'false', '0', '1']:
+                        # Check if it looks like a product name (not a section/category)
+                        if product_id is None and not any(keyword in value.lower() for keyword in ['section', 'category', 'empty']):
+                            product_id = value
+                
+                # Pattern 2: Look for section/category in attributes
+                attr_name = str(attr.get('name', '')).lower()
+                if 'section' in attr_name or 'category' in attr_name:
+                    section_label = attr.get('value')
+            
+            # If no product name found, try to get it from label name or other fields
+            if product_id is None:
+                # You might want to add logic here to extract from label_id mapping
+                # For now, we'll leave it as None and let the user fill it in
+                pass
+            
+            # Create entry in ground truth format (only required fields)
+            entry = {
+                "detection_idx": idx,  # Use annotation order as detection index
+                "product_id": product_id,  # Will be None if not found in attributes
+            }
+            
+            # Add section_label only if found
+            if section_label:
+                entry["section_label"] = section_label
+            
+            # Only include entries that have a product_id
+            # Skip entries without product_id (user needs to fill them manually)
+            if product_id is not None:
+                ground_truth_data.append(entry)
+        
+        # Return directly in ground truth JSON format (array of objects)
+        return ground_truth_data
