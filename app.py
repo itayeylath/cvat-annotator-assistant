@@ -397,17 +397,17 @@ async def get_sections_for_catalog(
     label_id: Optional[int] = Query(None, description="Optional label ID to filter annotations")
 ):
     """
-    Fetch annotations from CVAT job and return them directly in ground truth JSON format.
+    Fetch annotations from CVAT job and return them in section-based ground truth JSON format.
     
-    Returns a list of ground truth entries, each containing:
-    - detection_idx: Index/order of the annotation (0, 1, 2, ...)
-    - product_id: Product name extracted from attributes (required)
-    - section_label: Section label if available in attributes (optional)
+    Returns a list of ground truth sections, each containing:
+    - product_id: Product name extracted from attributes (e.g., "פסטה מסולסלים אסם (500 גרם)")
+    - points: Polygon coordinates as array of [x, y] pairs
     
     Only entries with a valid product_id are included in the response.
     Entries without product_id are skipped (user needs to fill them manually).
     
     The response is ready to use as ground truth JSON file for product classification.
+    Format matches the section-based ground truth format expected by the classification pipeline.
     """
     if not CVAT_TOKEN:
         raise HTTPException(400, "Missing CVAT_TOKEN env")
@@ -428,55 +428,67 @@ async def get_sections_for_catalog(
         
         # Filter only polygons (not rectangles, points, etc.)
         polygons = [s for s in shapes if s.get("type") == "polygon"]
-        print(f"***** polygons: {polygons}")
         if label_id is not None:
             polygons = [s for s in polygons if s.get("label_id") == label_id]
 
-        # Extract product names and section labels from attributes
+        # Extract product names and polygon points from attributes
         ground_truth_data = []
-        for idx, p in enumerate(polygons):
+        for p in polygons:
             attributes = p.get("attributes", [])
             
             # Extract product name from attributes
             product_id = None
-            section_label = None
             
             for attr in attributes:
                 # Look for product name in attributes
-                # Pattern 1: {'spec_id': X, 'value': 'ProductName'}
-                if 'value' in attr and attr['value']:
-                    value = attr['value']
-                    # Skip boolean/numeric values that aren't product names
-                    if isinstance(value, str) and value.lower() not in ['true', 'false', '0', '1']:
-                        # Check if it looks like a product name (not a section/category)
-                        if product_id is None and not any(keyword in value.lower() for keyword in ['section', 'category', 'empty']):
-                            product_id = value
-                
-                # Pattern 2: Look for section/category in attributes
-                attr_name = str(attr.get('name', '')).lower()
-                if 'section' in attr_name or 'category' in attr_name:
-                    section_label = attr.get('value')
+                # Pattern 1: {'spec_id': X, 'value': 'ProductName'} or {'name': 'product_id', 'value': '...'}
+                if isinstance(attr, dict):
+                    attr_name = str(attr.get('name', '')).lower()
+                    attr_value = attr.get('value')
+                    
+                    # Check if this attribute is specifically for product_id
+                    if 'product' in attr_name and attr_value:
+                        if isinstance(attr_value, str) and attr_value.strip():
+                            product_id = attr_value.strip()
+                    
+                    # Pattern 2: Generic value extraction (skip boolean/numeric)
+                    elif 'value' in attr and attr_value:
+                        if isinstance(attr_value, str) and attr_value.strip():
+                            value_lower = attr_value.lower().strip()
+                            # Skip boolean/numeric values that aren't product names
+                            if value_lower not in ['true', 'false', '0', '1', 'none', 'null', '']:
+                                # Check if it looks like a product name (not a section/category)
+                                if product_id is None and not any(keyword in value_lower for keyword in ['section', 'category', 'empty', 'not_empty']):
+                                    # If it's a meaningful string and not already assigned, use it
+                                    if len(attr_value.strip()) > 2:  # At least 3 characters
+                                        product_id = attr_value.strip()
             
-            # If no product name found, try to get it from label name or other fields
-            if product_id is None:
-                # You might want to add logic here to extract from label_id mapping
-                # For now, we'll leave it as None and let the user fill it in
-                pass
+            # Extract polygon points
+            points_flat = p.get("points", [])  # Flat list: [x1, y1, x2, y2, ...]
             
-            # Create entry in ground truth format (only required fields)
-            entry = {
-                "detection_idx": idx,  # Use annotation order as detection index
-                "product_id": product_id,  # Will be None if not found in attributes
-            }
+            # Convert flat list to array of [x, y] pairs
+            polygon_points = []
+            if len(points_flat) >= 6:  # At least 3 points (6 coordinates)
+                for i in range(0, len(points_flat), 2):
+                    if i + 1 < len(points_flat):
+                        polygon_points.append([float(points_flat[i]), float(points_flat[i + 1])])
             
-            # Add section_label only if found
-            if section_label:
-                entry["section_label"] = section_label
+            # Close the polygon if needed (first point should equal last point)
+            if len(polygon_points) >= 3:
+                first_point = polygon_points[0]
+                last_point = polygon_points[-1]
+                if first_point != last_point:
+                    polygon_points.append(first_point.copy())  # Close the polygon
             
             # Only include entries that have a product_id
             # Skip entries without product_id (user needs to fill them manually)
-            if product_id is not None:
+            if product_id is not None and product_id != "":
+                # Create entry in section-based ground truth format
+                entry = {
+                    "product_id": product_id,
+                    "points": polygon_points  # Polygon coordinates as [[x, y], [x, y], ...]
+                }
                 ground_truth_data.append(entry)
         
-        # Return directly in ground truth JSON format (array of objects)
+        # Return directly in section-based ground truth JSON format (array of objects)
         return ground_truth_data
